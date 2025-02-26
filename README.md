@@ -29,20 +29,24 @@ Concretely, in the BitcoinTestFramework, funding occurs automatically when the n
 
 ### Replacement Cycling 1
 > [!NOTE]
-> This scenario is complete, though more tweaking and guidance around fee-rate configuration is needed.
+> This scenario is still undergoing changes to support additional configuration around fee-rates to allow for
+> experimentation with different fee-rate scenarios.
 
-The first scenario is motivated by [Riard's original work](https://github.com/ariard/bitcoin/commits/2023-test-mempool) (which is available for reference in this repository at [reference/riard_replacement_cycling_1.py](./reference/riard_replacement_cycling_1.py)). It is built around the same low-level mechanics, but is more configurable and perhaps easier to understand.
+The first scenario is motivated by [Riard's original work](https://github.com/ariard/bitcoin/commits/2023-test-mempool) (which is available for reference in this repository at [reference/riard_replacement_cycling_1.py](./reference/riard_replacement_cycling_1.py)). It is built around similar low-level mechanics, but is more configurable and perhaps easier to understand to a point.
+
+The Warnet scenario is based on a network of 3 Bitcoin core nodes with 1 (`Alice`) acting as a miner only and not actively participating in the scenario other than to mine blocks and fund other nodes, and the remaining 2 nodes (`Mallory` and `Bob`) acting as active participants. In Riard's original work he uses just 2 nodes (`Alice` and `Bob`) as active participants and uses the MiniWallet construct for funding.
 
 If comparing to Riard's work, please note the following equivalences:
-- VICTIM: `Alice` (Riard) is equivalent to `Bob` (Warnet)
-- ATTACKER: `Bob` (Riard) is equivalent to `Mallory` (Warnet)
-- FUNDS: MiniWallet (Riard) functionality provided by `Alice` (Warnet)
+- VICTIM: `Alice` (Riard) is equivalent to `Bob` (this scenario)
+- ATTACKER: `Bob` (Riard) is equivalent to `Mallory` (this scenario)
+- FUNDS: MiniWallet (Riard) functionality provided by `Alice` (this scenario)
 
-This scenario does not use the Lightning Network capabilities of Warnet and simply demonstrates the mechanics of a Replacement Cycling Attack using only Bitcoin Core nodes and (manually created) Lightning Network-like primitives such as channels (2-of-2 multisigs) and HTLC and channel state transactions (such as commitment, timeout and pre-image transactions). More specifically:
+This scenario does not use the Lightning Network capabilities of Warnet nor does it use a realistic mempool state. It simply demonstrates the mechanics of a Replacement Cycling Attack using only Bitcoin Core nodes, manually created Lightning Network-like primitives such as channels (2-of-2 multisigs) and HTLC and channel state transactions (such as commitment, timeout and pre-image transactions) and a very basic mempool state. More specifically:
 - Channel openings are simulated using manually created 2-of-2 multisig transactions (as opposed to the interactive and automated channel opening process of Lightning Nodes).
 - Channel closes are simulated using manually created transactions that are similar to commitment transactions.
 - Manually created transactions are used for the timeout and pre-image transactions.
-- The MiniWallet construct is not used as it is not possible to do so. The Warnet scenario is based on a network of 3 Bitcoin core nodes with 1 (`Alice`) acting as a miner only and not actively participating in the scenario other than to mine blocks and fund other nodes, and the remaining 2 nodes (`Mallory` and `Bob`) acting as active participants. In Riard's original work he uses just 2 nodes (`Alice` and `Bob`) as active participants and uses the MiniWallet construct for funding.
+- "The mempool" is almost always empty so there is no competition for block space and no fee market dynamics.
+- The MiniWallet construct is not used as it is not possible to do so as described above.
 
 For full details of the scenario, including a step-by-step breakdown of the attack, see the [Replacement Cycling Scenario 1 documentation](./docs/replacement-cycling-1.md). The code for this scenario is implemented in [scenarios/replacement_cycling_1.py](./scenarios/replacement_cycling_1.py).
 
@@ -50,6 +54,9 @@ For full details of the scenario, including a step-by-step breakdown of the atta
 > [!WARNING]
 > This scenario is a WIP and not yet available.
 
-This second scenario moves away from the low-level mechanics demonstrating a recycling attack in the first scenario and utilises more of the capabilities of Warnet. Specifically, it leverages the ability to spin up Lightning Nodes and then interact with them in a manner similar to the RPC access to Bitcoin Core nodes.
+This second scenario moves away from the low-level mechanics demonstrating a recycling attack in the first scenario and utilises more of the capabilities of Warnet. Specifically:
+- It leverages the ability to spin up Lightning Nodes and then interact with them in a manner similar to the RPC access to Bitcoin Core nodes.
+- It features a more dynamic fee market with multiple nodes and many more transactions in the mempool.
+- It has potentially multiple iteration of a recycling attack, with `Bob` discovering that his timeout transaction has disappeared from the mempool leading to `Bob` re-broadcasting a replacement timeout transaction and `Mallory` attacking again.
 
 For full details of the scenario, including a step-by-step breakdown of the attack, see the [Replacement Cycling Scenario 2 documentation](./docs/replacement-cycling-2.md). The code for this scenario is implemented in [scenarios/replacement_cycling_2.py](./scenarios/replacement_cycling_2.py).
