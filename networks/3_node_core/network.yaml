@@ -1,0 +1,13 @@
+nodes:
+  - name: alice
+    addnode:
+      - mallory
+      - bob
+
+  - name: mallory
+    addnode:
+      - bob
+
+  - name: bob
+    addnode:
+      - mallory

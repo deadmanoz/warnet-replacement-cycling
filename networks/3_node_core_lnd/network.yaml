@@ -1,0 +1,19 @@
+nodes:
+  - name: alice
+    addnode:
+      - bob
+      - mallory
+
+  - name: bob
+    addnode:
+      - alice
+      - mallory
+    ln:
+      lnd: true # node will be bob-ln
+
+  - name: mallory
+    addnode:
+      - alice
+      - bob
+    ln:
+      lnd: true # node will be mallory-ln
