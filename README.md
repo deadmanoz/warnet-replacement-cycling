@@ -28,9 +28,10 @@ StopIteration
 Concretely, in the BitcoinTestFramework, funding occurs automatically when the node mines enough blocks and the MiniWallet rescans the chain, populating its UTXO list. And while you can instantiate a MiniWallet within a Warnet scenario, the necessary live UTXO state isn’t available via RPC, so you'll get an error like the above.
 
 ### Replacement Cycling 1
-> [!NOTE]
-> This scenario is still undergoing changes to support additional configuration around fee-rates to allow for
-> experimentation with different fee-rate scenarios.
+> [!WARNING]
+> This scenario is still a work in progress as I've somewhat misunderstood the mechanics of replacement cycling...
+>
+> After reading the original mailing list thread on this topic (https://gnusha.org/pi/bitcoindev/CALZpt+GdyfDotdhrrVkjTALg5DbxJyiS8ruO2S7Ggmi9Ra5B9g@mail.gmail.com/) it's clear that `Mallory` should be broadcasting her pre-image each cycle such that `Bob`'s pre-image is similarly removed each cycle!
 
 The first scenario is motivated by [Riard's original work](https://github.com/ariard/bitcoin/commits/2023-test-mempool) (which is available for reference in this repository at [reference/riard_replacement_cycling_1.py](./reference/riard_replacement_cycling_1.py)). It is built around similar low-level mechanics, but is more configurable and perhaps easier to understand to a point.
 
